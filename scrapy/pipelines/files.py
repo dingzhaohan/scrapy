@@ -276,6 +276,61 @@ class GCSFilesStore:
         )
 
 
+class OSSFilesStore:
+    OSS_ENDPOINT_URL = None
+    OSS_ACCESS_KEY_ID = None
+    OSS_ACCESS_KEY_SECRET = None
+    CACHE_CONTROL = "max-age=172800"
+
+    # The bucket's default object ACL will be applied to the object.
+    # Overridden from settings.FILES_STORE_GCS_ACL in FilesPipeline.from_settings.
+    POLICY = None
+
+    def __init__(self, uri):
+        import oss2
+        from oss2.credentials import StaticCredentialsProvider
+             
+        self.bucket, self.prefix = uri[6:].split("/", 1)  # oss://dp-filetrans/arxiv/image
+        
+        auth = oss2.ProviderAuth(StaticCredentialsProvider(self.OSS_ACCESS_KEY_ID, self.OSS_ACCESS_KEY_SECRET))
+        self.client = oss2.Bucket(auth, self.OSS_ENDPOINT_URL, self.bucket)
+
+        if not uri.startswith("oss://"):
+            raise ValueError(f"Incorrect URI scheme in {uri}, expected 'oss'")
+        
+        
+        
+    def stat_file(self, path, info):
+        def _onsuccess(blob):
+            if blob:
+                checksum = base64.b64decode(blob.md5_hash).hex()
+                last_modified = time.mktime(blob.updated.timetuple())
+                return {"checksum": checksum, "last_modified": last_modified}
+            return {}
+
+        blob_path = self._get_blob_path(path)
+        return threads.deferToThread(self.bucket.get_blob, blob_path).addCallback(
+            _onsuccess
+        )
+
+    def _get_content_type(self, headers):
+        if headers and "Content-Type" in headers:
+            return headers["Content-Type"]
+        return "application/octet-stream"
+
+    def _get_blob_path(self, path):
+        return self.prefix + path
+
+    def persist_file(self, path, buf, info, meta=None, headers=None):
+        key_name = f"{self.prefix}{path}"
+        buf.seek(0)
+        return threads.deferToThread(
+            self.client.put_object,
+            key=key_name,
+            data=buf
+        )
+
+
 class FTPFilesStore:
     FTP_USERNAME = None
     FTP_PASSWORD = None
@@ -351,6 +406,7 @@ class FilesPipeline(MediaPipeline):
         "file": FSFilesStore,
         "s3": S3FilesStore,
         "gs": GCSFilesStore,
+        "oss": OSSFilesStore,
         "ftp": FTPFilesStore,
     }
     DEFAULT_FILES_URLS_FIELD = "file_urls"
@@ -400,6 +456,11 @@ class FilesPipeline(MediaPipeline):
         gcs_store.GCS_PROJECT_ID = settings["GCS_PROJECT_ID"]
         gcs_store.POLICY = settings["FILES_STORE_GCS_ACL"] or None
 
+        oss_store = cls.STORE_SCHEMES["oss"]
+        oss_store.OSS_ENDPOINT_URL = settings["OSS_ENDPOINT_URL"]
+        oss_store.OSS_ACCESS_KEY_ID = settings["OSS_ACCESS_KEY_ID"]
+        oss_store.OSS_ACCESS_KEY_SECRET = settings["OSS_ACCESS_KEY_SECRET"]
+        
         ftp_store = cls.STORE_SCHEMES["ftp"]
         ftp_store.FTP_USERNAME = settings["FTP_USER"]
         ftp_store.FTP_PASSWORD = settings["FTP_PASSWORD"]
